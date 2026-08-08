@@ -1,13 +1,59 @@
-# monthly-report-skills 一键安装脚本
+﻿# monthly-report-skills 一键安装脚本
 # 用法：
 #   1. 下载仓库 ZIP 并解压
 #   2. 右键 install.ps1 -> "使用 PowerShell 运行"
 #      （或打开 PowerShell 执行：powershell -ExecutionPolicy Bypass -File install.ps1）
 # 效果：把 monthly-report-skill-builder 复制到检测到的 agent 的 skills 目录
+#
+# 网络受限时（git clone / raw.githubusercontent.com 被重置，实测走不通）：
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -FromGitHub
+#   → 改走 GitHub API blob 接口（base64）下载全部文件，无需 git、无需 ZIP
+
+param([switch]$FromGitHub)
 
 $ErrorActionPreference = 'Stop'
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SkillDir = Join-Path $ScriptDir 'monthly-report-skill-builder'
+
+# PowerShell 5.1 默认 TLS 1.0，GitHub API 需要 TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# ---- 来源准备：默认本地解压目录；-FromGitHub 走 GitHub API 下载 ----
+$SkillDir = $null
+if ($FromGitHub) {
+    Write-Host "正在从 GitHub API 下载（git clone / raw 直连失败时的兜底路径）..." -ForegroundColor Cyan
+    $tmpRoot = Join-Path $env:TEMP ('mcrs-' + [guid]::NewGuid().ToString('N'))
+    $SkillDir = Join-Path $tmpRoot 'monthly-report-skill-builder'
+    $apiBase = 'https://api.github.com/repos/Bananafish-cloud/monthly-report-skills/contents'
+
+    function Invoke-GithubDownload {
+        param([string]$RelPath)
+        $items = Invoke-RestMethod -Uri "$apiBase/$RelPath`?ref=main" -Headers @{ 'User-Agent' = 'monthly-report-skills-install' }
+        foreach ($it in $items) {
+            if ($it.type -eq 'dir') {
+                Invoke-GithubDownload $it.path
+            } else {
+                # 文件内容走 contents API 的 base64 content 字段，不用 download_url（那是 raw 域名，会被重置）
+                $resp = Invoke-RestMethod -Uri "$apiBase/$($it.path)`?ref=main" -Headers @{ 'User-Agent' = 'monthly-report-skills-install' }
+                $raw = [string]$resp.content
+                $bytes = [Convert]::FromBase64String(($raw -replace '\s+', ''))
+                $outFile = Join-Path $tmpRoot ($it.path -replace '/', '\')
+                New-Item -ItemType Directory -Force -Path (Split-Path $outFile) | Out-Null
+                [IO.File]::WriteAllBytes($outFile, $bytes)
+                Write-Host "  [OK] $($it.path)" -ForegroundColor DarkGray
+            }
+        }
+    }
+    try {
+        Invoke-GithubDownload 'monthly-report-skill-builder'
+    } catch {
+        Write-Host "GitHub API 下载失败: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "请检查网络能否访问 api.github.com；或改用「下载 ZIP 解压」方式安装。" -ForegroundColor Yellow
+        Read-Host "按回车退出"
+        exit 1
+    }
+} else {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $SkillDir = Join-Path $ScriptDir 'monthly-report-skill-builder'
+}
 
 if (-not (Test-Path $SkillDir)) {
     Write-Host "未找到 monthly-report-skill-builder 文件夹（应在 $SkillDir）" -ForegroundColor Red
@@ -16,7 +62,7 @@ if (-not (Test-Path $SkillDir)) {
     exit 1
 }
 
-# 候选 agent 的 skills 目录（WorkBuddy 不同版本/机器可能用 .workbuddy 或 .hermes，都检测）
+# ---- 候选 agent 的 skills 目录（WorkBuddy 不同版本/机器可能用 .workbuddy 或 .hermes，都检测）----
 $Candidates = [ordered]@{
     'WorkBuddy (.workbuddy)' = Join-Path $HOME '.workbuddy\skills'
     'WorkBuddy (.hermes)'    = Join-Path $HOME '.hermes\skills'
